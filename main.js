@@ -1,4 +1,4 @@
-const { ethers } = require("ethers");
+  const { ethers } = require("ethers");
 const axios = require("axios");
 require("dotenv").config();
 
@@ -18,154 +18,93 @@ const WETH_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
 ];
 
-function getRandomPercentage(min, max) {
-  return Math.random() * (max - min) + min;
-}
+const FIXED_GAS_PRICE = ethers.parseUnits("0.2", "gwei");
+const AMOUNT = ethers.parseEther("0.01"); // Amount to wrap/unwrap for TX Value
+const ITERATIONS = 1; // Loop Process TX
 
-function getRandomDelay(min, max) {
-  return Math.floor(Math.random() * (max - min + 1) + min) * 1000;
-}
-
-async function getBalance(contract, address) {
-  try {
-    return await contract.balanceOf(address);
-  } catch (error) {
-    console.error(`Error getting balance: ${error.message}`);
-    throw error;
-  }
-}
-
-async function getETHPriceInUSDT() {
-  try {
-    const response = await axios.get(
-      "https://api.coingecko.com/api/v3/simple/price",
-      {
-        params: {
-          ids: "ethereum",
-          vs_currencies: "usd",
-        },
-      }
-    );
-
-    const ethPriceInUSD = response.data.ethereum.usd;
-    return ethPriceInUSD;
-  } catch (error) {
-    console.error(`Error fetching ETH price: ${error.message}`);
-    throw error;
-  }
-}
-
-async function getCombinedBalanceInUSDT(walletAddress) {
-  const wethContract = new ethers.Contract(WETH_ADDRESS, WETH_ABI, provider);
-  const [ethBalance, wethBalance, ethPrice] = await Promise.all([
-    provider.getBalance(walletAddress),
-    getBalance(wethContract, walletAddress),
-    getETHPriceInUSDT(),
+async function getBalances(provider, wethContract, address) {
+  const [ethBalance, wethBalance] = await Promise.all([
+    provider.getBalance(address),
+    wethContract.balanceOf(address),
   ]);
-
-  const ethBalanceFormatted = ethers.formatEther(ethBalance);
-  const wethBalanceFormatted = ethers.formatEther(wethBalance);
-  const totalEth =
-    parseFloat(ethBalanceFormatted) + parseFloat(wethBalanceFormatted);
-
-  return totalEth * ethPrice;
+  return { ethBalance, wethBalance };
 }
 
-async function wrapETH(contract, amount) {
-  try {
-    const tx = await contract.deposit({ value: amount });
-    await tx.wait();
-  } catch (error) {
-    console.error(`Error wrapping ETH: ${error.message}`);
-    throw error;
-  }
+async function logBalances(provider, wethContract, address, stage) {
+  const { ethBalance, wethBalance } = await getBalances(provider, wethContract, address);
+  console.log(`\n--- Balances at ${stage} ---`);
+  console.log(`ETH balance: ${ethers.formatEther(ethBalance)} ETH`);
+  console.log(`WETH balance: ${ethers.formatEther(wethBalance)} WETH`);
 }
 
-async function unwrapETH(contract, amount) {
-  try {
-    const tx = await contract.withdraw(amount);
-    await tx.wait();
-  } catch (error) {
-    console.error(`Error unwrapping ETH: ${error.message}`);
-    throw error;
-  }
+async function wrapETH(wethContract, amount) {
+  console.log(`\nWrapping ${ethers.formatEther(amount)} ETH to WETH...`);
+  const tx = await wethContract.deposit({ value: amount, gasPrice: FIXED_GAS_PRICE });
+  await tx.wait();
+  console.log("Wrap complete.");
 }
 
-async function performWrapsAndUnwraps(wallet) {
+async function unwrapETH(wethContract, amount) {
+  console.log(`\nUnwrapping ${ethers.formatEther(amount)} WETH to ETH...`);
+  const tx = await wethContract.withdraw(amount, { gasPrice: FIXED_GAS_PRICE });
+  await tx.wait();
+  console.log("Unwrap complete.");
+}
+
+async function performWrapAndUnwrap(wallet, iteration) {
+  console.log(`\n=== Processing wallet: ${wallet.address} (Iteration ${iteration + 1}/${ITERATIONS}) ===`);
   const walletInstance = new ethers.Wallet(wallet.privateKey, provider);
-  const wethContract = new ethers.Contract(
-    WETH_ADDRESS,
-    WETH_ABI,
-    walletInstance
-  );
+  const wethContract = new ethers.Contract(WETH_ADDRESS, WETH_ABI, walletInstance);
 
   try {
-    const [ethBalance, wethBalance] = await Promise.all([
-      provider.getBalance(wallet.address),
-      getBalance(wethContract, wallet.address),
-    ]);
+    // Log initial balances
+    await logBalances(provider, wethContract, wallet.address, "start");
 
-    await performOperations(wrapETH.bind(null, wethContract), ethBalance, 3, 6);
-    await performOperations(
-      unwrapETH.bind(null, wethContract),
-      wethBalance,
-      3,
-      6
-    );
+    // Wrap ETH to WETH
+    const { ethBalance } = await getBalances(provider, wethContract, wallet.address);
+    if (ethBalance >= AMOUNT) {
+      await wrapETH(wethContract, AMOUNT);
+      await logBalances(provider, wethContract, wallet.address, "after wrapping");
+    } else {
+      console.log(`Insufficient ETH balance for wrapping. Need ${ethers.formatEther(AMOUNT)} ETH.`);
+      return false; // Stop the process for this wallet if insufficient funds
+    }
+
+    // Unwrap WETH to ETH
+    const { wethBalance } = await getBalances(provider, wethContract, wallet.address);
+    if (wethBalance >= AMOUNT) {
+      await unwrapETH(wethContract, AMOUNT);
+      await logBalances(provider, wethContract, wallet.address, "after unwrapping");
+    } else {
+      console.log(`Insufficient WETH balance for unwrapping. Need ${ethers.formatEther(AMOUNT)} WETH.`);
+      return false; // Stop the process for this wallet if insufficient funds
+    }
+
+    return true; // Successfully completed both wrap and unwrap
   } catch (error) {
-    console.error(
-      `Error in main function for ${wallet.address}: ${error.message}`
-    );
-  }
-}
-
-async function performOperations(operation, balance, minTimes, maxTimes) {
-  const times =
-    Math.floor(Math.random() * (maxTimes - minTimes + 1)) + minTimes;
-  for (let i = 0; i < times; i++) {
-    const percentage = getRandomPercentage(0.08, 0.12);
-    const amount =
-      (BigInt(balance) * BigInt(Math.floor(percentage * 1e18))) / BigInt(1e18);
-    await operation(amount);
-    await new Promise((resolve) => setTimeout(resolve, getRandomDelay(2, 6)));
+    console.error(`Error in wrap/unwrap process for ${wallet.address}: ${error.message}`);
+    console.error("Error stack:", error.stack);
+    return false; // Stop the process for this wallet if an error occurred
   }
 }
 
 async function main() {
-  const promises = wallets.map((wallet) => performWrapsAndUnwraps(wallet));
-  await Promise.all(promises);
-}
-
-async function runMultipleTimes(times) {
-  const initialBalances = await Promise.all(
-    wallets.map(async (wallet) => {
-      const balanceInUSDT = await getCombinedBalanceInUSDT(wallet.address);
-      console.log(
-        `Initial balance for ${wallet.address.slice(
-          0,
-          6
-        )}...${wallet.address.slice(-4)}: ${balanceInUSDT.toFixed(2)}$`
-      );
-      return balanceInUSDT;
-    })
-  );
-
-  for (let i = 0; i < times; i++) {
-    await main();
+  for (const wallet of wallets) {
+    console.log(`\n\n=== Starting process for wallet: ${wallet.address} ===`);
+    for (let i = 0; i < ITERATIONS; i++) {
+      const success = await performWrapAndUnwrap(wallet, i);
+      if (!success) {
+        console.log(`Stopping process for wallet ${wallet.address} due to error or insufficient funds.`);
+        break; // Move to the next wallet if there's an error or insufficient funds
+      }
+      // Add a small delay between iterations to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
-
-  const finalBalances = await Promise.all(
-    wallets.map(async (wallet) => {
-      const balanceInUSDT = await getCombinedBalanceInUSDT(wallet.address);
-      console.log(
-        `Final balance for ${wallet.address.slice(
-          0,
-          6
-        )}...${wallet.address.slice(-4)}: ${balanceInUSDT.toFixed(2)}$`
-      );
-      return balanceInUSDT;
-    })
-  );
 }
 
-runMultipleTimes(20);
+main().catch((error) => {
+  console.error("Unhandled error in main function:", error);
+  process.exit(1);
+});
+
